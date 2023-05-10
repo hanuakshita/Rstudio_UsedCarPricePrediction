@@ -1,0 +1,521 @@
+---
+title: "Used Car Prediction"
+output: html_document
+date: "2023-04-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Load the required libraries and dataset**
+
+```{r, results='hide'}
+# Load the libraries
+library(ggplot2)
+library(tidyverse)
+library(corrplot)
+library(caret)
+library(randomForest)
+#library(rsq)
+library(e1071)
+library(stats)
+library(Metrics)
+library(doParallel)
+library(SuperLearner)
+
+set.seed(123)
+```
+
+# Data Acquisition
+Load the dataset
+
+```{r}
+# Load the dataset
+URL = "https://raw.githubusercontent.com/insaid2018/Term-1/master/Data/Projects/car_sales.csv"
+df <- read.csv(URL)
+head(df)
+```
+
+The raw data was inform of csv(comma separated value) file and was imported to the data frame in R. The first five rows of the data frame were inspected. 
+
+# Data Exploration
+The car prices data will visualized in plots and graphs. The graphs will help to compare different groups, detect outliers as well as finding distribution of continuous values.
+
+## Comparison
+Compare different model price.
+
+```{r}
+#Groupby make/model
+df_makes = df %>% group_by(car)  %>%
+  summarise(average_price = mean(price),
+            .groups = 'drop')
+
+#Plot the bar chart
+barplot(height=df_makes$average_price)
+
+# memory management
+rm(df_makes)
+```
+
+The average price for each model was compared, there were models that were more expensive than others 
+
+## Outlier detection 
+Does the dataset contain outliers? Lets inspect the outliers for continuous variables. The detected outliers will be removed from the dataset, but before we remove outliers lets inspect the null values available in the dataset
+
+```{r}
+sum(is.na(df))
+```
+
+There are 434 null values in the dataset but let's inspect the outliers and work on the null data points
+
+**Outliers in price** 
+
+```{r}
+boxplot(df$price, 
+        main = "Outliers in price",
+        ylab = "Price")
+```
+Car Prices above 24000 are considered as extremely high(Outliers). Any car above 24000 will be dropped. 
+
+```{r}
+df <- subset(df, price < 24000)
+dim(df)
+```
+
+**Outliers in mileage**
+
+```{r}
+boxplot(df$mileage, 
+        main = "Outliers in car mileage",
+        ylab = "Mileage")
+```
+Values more than 350 in car mileage are considered as outliers. The car with more than 350 miles of mileage will be removed from the dataset
+
+```{r}
+df <- subset(df, mileage < 350)
+dim(df)
+```
+More than 200 records were removed when removing outliers in car mileage
+
+**Outliers in engV**
+
+```{r}
+boxplot(df$engV, 
+        main = "Outliers in engV",
+        ylab = "engV")
+```
+
+Values above 3.3 and below 0.3 in engine capacity(engV) were considered as outliers.
+
+```{r}
+df <- subset(df, engV < 3.3 & engV > 0.3)
+dim(df)
+```
+
+After dropping out all outliers more than 2000 records were that were outliers were removed.  
+
+## Distribution 
+Distribution of Mileage
+
+```{r}
+hist(df$mileage, 
+     main = "Distribution of mileage",
+     ylab = "Mileage")
+```
+ 
+The Mileage distribution is near normal but slightly left skewed. More cars had a car mileage of less than 300 miles  
+
+# Data Cleaning and Shaping 
+Data Cleaning is very effective in any data science process, it helps to identify and fix messy data. It ensures the data being analyzed (car sales data for this case) is ready and accurate for further analysis. Poor data quality can lead to biased results that may lead to poor business decisions. It is therefore important to clean the data.  
+
+**Inspect the data shape**
+
+```{r}
+dim(df)
+```
+
+The dataset has approximately 10000 records and 10 features. 
+
+**Identification of Missing Values after imputation**
+
+```{r}
+df <- na.omit(df)
+sum(is.na(df))
+```
+
+There more than 0 null points in the dataset. Any record with null value was be removed during outlier detection therefore the dataset has no null values but there may be records that are duplicated. 
+
+```{r}
+sum(duplicated(df))
+```
+ 
+There were 46 duplicated records. The duplicated records will be dropped only the first one. 
+
+```{r}
+# Use duplicated to find duplicated rows
+duplicates <- duplicated(df)
+
+# Subset the data frame to remove duplicated rows
+df <- df[!duplicates, ]
+rm(duplicates) #memory management
+
+# Confirm the operation
+sum(duplicated(df))
+```
+
+
+# Feature engineering 
+Lets find them. The year column can be converted to year of service whereby its value will be subtracted from the current year, 2023. 
+
+```{r}
+#Years of service
+df$yearsOfService <- 2023 - df$year
+
+# Drop the year column
+df <- subset(df, select = c(-year))
+head(df) #confirm the operation 
+```
+
+**Standardization of the dataset**
+The numeric features will be normalized by Min Max scaling in the range of 0 to 1. 
+
+```{r}
+df$mileage <- scale(df$mileage)
+df$engV <- scale(df$engV)
+df$yearsOfService <- scale(df$yearsOfService)
+head(df)
+```
+
+All duplicated records were successfully dropped. Lets now calculate the summary statistics 
+
+```{r}
+summary(df)
+```
+
+**Label Encoding** 
+
+They are many non numeric features in the dataset, for instance engine type, registration and car. They should be converted to numeric features by label encoding as machines only understand numbers. 
+
+```{r}
+#Convert non numeric columns to numeric 
+convert_to_numeric <- function(x){
+  if (typeof(x)=="character"){
+    factored <- as.factor(x) #Create categories
+    numerized <- as.numeric(factored) #Convert the categories into numbers 
+  }
+  else{
+    x
+  }
+}
+df_num <- sapply(df, convert_to_numeric)
+
+head(df_num)
+```
+All the non numeric features were converted to numeric. 
+
+Log transformation was done but it produced null values hence it was not advisable to transform the non uniformly distributed features.
+
+Compute the correlation to find variables that are more related to the target variables. The correlation matrix is then plotted onto a heatmap.
+
+```{r}
+cor_matrix = round(cor(df_num, method = "pearson", use = "complete.obs"), 2)
+
+corrplot(cor_matrix, order = 'AOE', addCoef.col = 'black', tl.pos = 'd',
+         cl.pos = 'n', col = COL1('Blues'))
+```
+yearsOfService, mileage, engine capacity(engV), model and registration had a strong correlation(above 0.23 and below 0.23) with the target variable, 'price'. The dataframe will be filtered only to have the features and the price feature. 
+
+```{r}
+df <- subset(df_num, select = c(yearsOfService, 
+                              mileage, 
+                              engV, 
+                              model, 
+                              registration, 
+                              price))
+
+# convert to DataFrame
+df <- data.frame(df)
+head(df)
+```
+
+
+# Model Construction 
+## Principal Component Analysis
+
+The PCA values will be computed for the independent features in the dataset. PCA is a dimensionality reduction technique that aims to reduce the number of independent features for easy training of the models.
+
+```{r}
+X <- subset(df, select = -c(price))
+
+# Perform PCA on the select independent data
+pc <- prcomp(X,
+             center = TRUE,
+            scale. = TRUE)
+pcaX <- pc$x
+head(pcaX)
+```
+
+Append the dependent dataset to the PCA transformed one
+
+## Feature Engineering - new derived features
+
+```{r}
+new_data <- predict(pc, X)
+new_data <- data.frame(new_data)
+price <- df$price #the target variable
+new_data <- cbind(new_data, price)
+head(new_data)
+```
+
+The PCA transformed dataset was stored in a dataframe. 
+
+## Split the data into train and test dataset
+
+```{r}
+dt = sort(sample(nrow(new_data), nrow(new_data)*.8))
+train_df <- as.data.frame(new_data[dt,])
+test_df <- as.data.frame(new_data[-dt,])
+head(test_df)
+```
+## Models - Hold-out method
+### Step 1: Working with PCA transformed dataset
+### Linear Regression
+
+Linear regression model was  trained with the trained dataset 
+
+```{r}
+# Prepare the linear regression model and fit it with the train dataset
+lin_reg <- lm(price~., data=train_df)
+summary(lin_reg)
+```
+
+**Model Evaluation**
+
+```{r}
+# Do predictions with the test dataset 
+independent_test_data <- test_df %>% select(-price) 
+y_test <- test_df$price
+y_predicted <- predict(lin_reg, independent_test_data)
+
+# Test accuracy score - calculate r_squared score
+r2.score <- function(actual, predicted){
+  rss <- sum((y_predicted - y_test) ^ 2)  ## residual sum of squares
+  tss <- sum((y_test - mean(y_test)) ^ 2)  ## total sum of squares
+  rsq <- 1 - rss/tss
+  return(rsq)
+}
+
+print(paste("R_squared score: ", r2.score(y_test, y_predicted)))
+print(paste("MAD score: ", mad(y_test, y_predicted)))
+print(paste("MSE score: ", mse(y_test, y_predicted)))
+print(paste("RMSE score: ", rmse(y_test, y_predicted)))
+```
+
+The linear regression model has an accuracy of about 44%. Lets work on Support Vector Machine Regressor to see if the accuracy may change. Linear regression is not a good fit for this problem
+
+### Support Vector Machine Regression 
+Fit the model with the train dataset 
+
+```{r}
+svm_reg <- svm(price~., train_df)
+summary(svm_reg)
+```
+
+**Model Evaluation**
+
+```{r}
+# Predictions 
+y_predicted <- predict(svm_reg, independent_test_data)
+
+# Evaluation
+print(paste("R_squared score: ", r2.score(y_test, y_predicted)))
+print(paste("MAD score: ", mad(y_test, y_predicted)))
+print(paste("MSE score: ", mse(y_test, y_predicted)))
+print(paste("RMSE score: ", rmse(y_test, y_predicted)))
+```
+
+The SVM model has a low accuracy also but better than the linear regression model. It had an accuracy of approximately 65%. Its RMSE, MAD, MSE scores were lower than ones from Linear regression showing that SVM is better than Linear regression for this problem. Finally lets try the last model, Random Forest Regressor model. 
+
+### Random Forest Regression 
+
+```{r}
+#**Fit the random forest regression with train data 
+rf_reg <- randomForest(price ~ ., data = train_df, ntree = 100, mtry = 3)
+summary(rf_reg)
+```
+
+**Model evaluation**
+
+```{r}
+# Predictions 
+y_predicted <- predict(rf_reg, independent_test_data)
+
+# Evaluation
+print(paste("R_squared score: ", r2.score(y_test, y_predicted)))
+print(paste("MAD score: ", mad(y_test, y_predicted)))
+print(paste("MSE score: ", mse(y_test, y_predicted)))
+print(paste("RMSE score: ", rmse(y_test, y_predicted)))
+```
+
+Random Forest Regression had the best score amongst all the models. However its still low. 
+
+### Step 2 : Working with non-PCA transformed data 
+
+PCA was used initially before when preprocessing the data, now the raw data(no PCA will be used) will just be standardized and fitted on the random forest regressor. 
+
+```{r}
+# memory management 
+rm(price)
+rm(dt)
+rm(y_predicted)
+rm(y_test)
+rm(lin_reg)
+rm(svm_reg)
+rm(rf_reg)
+rm(new_data)
+rm(independent_test_data)
+rm(df_num )
+```
+
+The variable that were not in use are deleted to reduce memory consumption. 
+
+Min Max Scaling 
+scale model and registration values 
+
+```{r}
+df$model <- scale(df$model)
+df$registration <- scale(df$registration)
+head(df)
+```
+
+## Split the data into train and test dataset
+
+```{r}
+dt = sort(sample(nrow(df), nrow(df)*.8))
+train_df <- as.data.frame(df[dt,])
+test_df <- as.data.frame(df[-dt,])
+head(test_df)
+```
+
+The dataset was then split into train and test dataset in the ratio of 80% to 20%. The first five records in the test dataset were then inspected. 
+
+## Random Forest Regression 
+
+```{r}
+#**Fit the random forest regression with train data 
+rf_reg <- randomForest(price ~ ., data = train_df, ntree = 100, mtry = 3)
+
+summary(rf_reg)
+```
+
+The model was prepared by fitting it with the train dataset. 
+
+**Model's evaluation**
+
+```{r}
+#Create X_test and y_test
+independent_test_data <- test_df %>% select(-price)
+y_test <- test_df$price
+
+# Predictions 
+y_predicted <- predict(rf_reg, independent_test_data)
+
+# Evaluation
+print(paste("R_squared score: ", r2.score(y_test, y_predicted)))
+print(paste("MAD score: ", mad(y_test, y_predicted)))
+print(paste("MSE score: ", mse(y_test, y_predicted)))
+print(paste("RMSE score: ", rmse(y_test, y_predicted)))
+```
+
+The performance of the Random Forest Regressor model increased amazingly. It reached to approximately 75%.
+
+
+```{r}
+# estimate variable importance
+importance <- varImp(rf_reg, scale=FALSE)
+# summarize importance
+print(importance)
+# plot importance
+barplot(importance$Overall)
+barplot(height=importance$Overall, names=rownames(importance), 
+        col="#69b3a2", horiz=T , las=1)
+```
+
+## Model - K Cross Validation method
+Since Random Forest model has been performing the best, it will be used to in this experiment. 3 folds will created, one will set out as the hold-out set and the other two will be used to train the model. This is because the computation ability of the computer is low and could not process the whole dataset repeatedly. The best one with the best score will be chosen.
+
+```{r}
+#specify the cross-validation method
+cv_method <- trainControl(method = "cv", number = 3)
+
+#fit a random forest regression model and use k-fold CV to evaluate performance
+model <- train(price ~ ., data = df, method = "rf", trControl = cv_method)
+
+print(model)
+```
+
+## Model - Parameter hypertuning method
+
+Random Search CV was used to find the best parameters. The tune length was set to 15. 
+
+```{r}
+mtry <- 2
+#ntree: Number of trees to grow.
+ntree <- 1
+
+
+control <- trainControl(method='repeatedcv', 
+                        number=2, 
+                        repeats=1,
+                        search = 'random')
+
+#Random generate 15 mtry values with tuneLength = 15
+set.seed(1)
+rf_random <- train(price ~ .,
+                   data = df,
+                   method = 'rf',
+                   metric = 'rsq',
+                   tuneLength  = 5, 
+                   trControl = control)
+print(rf_random)
+```
+
+
+## Ensemble Methods
+This model combines the probabilities and predictions from multiple machine learning models and selects the most common observation from all models based on average weightage of each model.
+
+```{r}
+# Get X_train and y_test values
+X_train <- train_df %>% select(-price) 
+y_train <- train_df$price
+
+# Fit the ensemble model
+model <- SuperLearner(y_train,
+                      X_train,
+                      SL.library=list("SL.lm",
+                                      "SL.ridge",
+                                      "SL.nnls"))
+# Return the model
+model
+```
+The ensemble learner was trained on linear regression, ridge regression and non-negative least squares regression models. SVM and Random Forest regression models were not used since they took forever to run. 
+
+Lets use the model to predict test data and evaluate the model. 
+
+```{r}
+rm(independent_test_data) #memory management
+X_test <- test_df %>% select(-price) 
+
+# Predictions
+predictions <- predict.SuperLearner(model, newdata=X_test)
+y_predicted <- predictions$pred
+
+# Evaluations
+print(paste("R_squared score: ", r2.score(y_test, y_predicted)))
+print(paste("MAD score: ", mad(y_test, y_predicted)))
+print(paste("MSE score: ", mse(y_test, y_predicted)))
+print(paste("RMSE score: ", rmse(y_test, y_predicted)))
+```
+
+The model performed poorly, poorer than single average line. It had a negative accuracy score. Single model surely performs better than the ensemble learner. 
